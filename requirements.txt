@@ -1,0 +1,10 @@
+streamlit
+pandas
+streamlit-aggrid
+lxml
+requests
+html5lib
+beautifulsoup4
+numpy
+scipy
+matplotlib
