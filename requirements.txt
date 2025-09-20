@@ -2,6 +2,8 @@
 streamlit
 numpy
 pandas
+beautifulsoup4
+requests   # likely needed for scraping
 
 # Local SALibrary wheel in the same folder as app.py
 SALibrary @ file://./SAlibrary-0.0.4-py3-none-any.whl
