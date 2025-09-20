@@ -9,12 +9,6 @@ from datetime import datetime, date
 st.set_page_config(page_title="MLB Season Simulation", layout="wide")
 st.title("⚾ MLB Season Simulation")
 
-# Sidebar: trials for Monte Carlo
-trials = st.sidebar.slider(
-    "Number of simulation trials",
-    min_value=10, max_value=1000, value=100, step=10
-)
-
 # Initialize session state
 if 'ratings' not in st.session_state:
     st.session_state['ratings'] = None
@@ -30,7 +24,7 @@ if 'home_advantage' not in st.session_state:
     st.session_state['home_advantage'] = None
 
 # Fetch Ratings Button
-if st.button("Fetch Ratings"):
+if st.button("Fetch schedule and compute ratings"):
     st.write("Fetching MLB schedule and computing ratings...")
 
     # Fetch schedule and standings
@@ -84,6 +78,12 @@ if st.button("Fetch Ratings"):
     st.session_state['rmse'] = rmse
     st.session_state['home_advantage'] = home_advantage
     st.session_state['sim_results'] = None  # clear old simulation
+
+# Simulation controls
+trials = st.slider(
+    "Number of simulation trials",
+    min_value=10, max_value=1000, value=100, step=10
+)
 
 # Run Simulation Button
 if st.button("Run Simulation"):
