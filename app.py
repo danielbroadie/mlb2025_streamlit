@@ -1,193 +1,309 @@
 import streamlit as st
-import pandas as pd
+import SALibrary.scrape as sc
+import SALibrary.simulate as sim
+import SALibrary.SimpleRatingSystem as srs
 import numpy as np
-from scipy.stats import norm
+import pandas as pd
+from datetime import datetime, date
 
-st.title("2025 MLB Game Data & Standings with Playoff Probabilities")
+st.set_page_config(page_title="MLB Season Simulation", layout="wide")
+st.title("⚾ MLB Season Simulation")
 
-uploaded_file = st.file_uploader("Upload a CSV file with 2025 MLB games", type=["csv"])
+# Sidebar: trials for Monte Carlo
+trials = st.sidebar.slider(
+    "Number of simulation trials",
+    min_value=10, max_value=1000, value=100, step=10
+)
 
-if uploaded_file is not None:
-    # --- Load CSV ---
-    df = pd.read_csv(uploaded_file, encoding='latin1')
-    df.columns = df.columns.str.strip()
-    df['Home Score'] = pd.to_numeric(df['Home Score'], errors='coerce')
-    df['Away Score'] = pd.to_numeric(df['Away Score'], errors='coerce')
+# Initialize session state
+if 'ratings' not in st.session_state:
+    st.session_state['ratings'] = None
+if 'schedule_probs' not in st.session_state:
+    st.session_state['schedule_probs'] = None
+if 'standings' not in st.session_state:
+    st.session_state['standings'] = None
+if 'sim_results' not in st.session_state:
+    st.session_state['sim_results'] = None
+if 'rmse' not in st.session_state:
+    st.session_state['rmse'] = None
+if 'home_advantage' not in st.session_state:
+    st.session_state['home_advantage'] = None
 
-    # --- Played games ---
-    df_played = df.dropna(subset=['Home Score', 'Away Score']).copy()
-    df_played['Run Differential'] = df_played['Home Score'] - df_played['Away Score']
+# Fetch Ratings Button
+if st.button("Fetch Ratings"):
+    st.write("Fetching MLB schedule and computing ratings...")
 
-    # --- Vectorized team ratings ---
-    teams = pd.concat([df['Home'], df['Away']]).unique()
-    n_teams = len(teams)
-    team_index = {team: i for i, team in enumerate(teams)}
+    # Fetch schedule and standings
+    schedule, standings = sc.scrape_mlb(2025)
 
-    X = np.zeros((len(df_played), n_teams + 1))
-    y = df_played['Run Differential'].to_numpy()
-    X[np.arange(len(df_played)), df_played['Home'].map(team_index)] = 1
-    X[np.arange(len(df_played)), df_played['Away'].map(team_index)] = -1
-    X[:, -1] = 1  # home advantage
-    params, _, _, _ = np.linalg.lstsq(X, y, rcond=None)
-    ratings = params[:n_teams]
-    home_adv = params[-1]
-    team_ratings = {team: ratings[team_index[team]] for team in teams}
+    # Prepare schedule
+    schedule = srs.months_test_set_MLB(schedule, standings)
+    schedule_so_far = schedule.dropna()
 
-    # --- Predicted Run Differential & Home Win Prob ---
-    df['Predicted Run Differential'] = (
-            ratings[df['Home'].map(team_index).to_numpy()] -
-            ratings[df['Away'].map(team_index).to_numpy()] +
-            home_adv
+    # Filter future games to only include today and later
+    today = date.today()
+
+    # Convert date column to datetime if it's not already
+    if 'Date' in schedule.columns:
+        schedule['Date'] = pd.to_datetime(schedule['Date']).dt.date
+        # Filter to keep only games from today onwards for future predictions
+        future_games = schedule[schedule['Date'] >= today]
+        # Keep all past games for training
+        past_games = schedule[schedule['Date'] < today].dropna()
+        # Combine: past games (completed) + future games (from today onwards)
+        schedule = pd.concat([past_games, future_games], ignore_index=True)
+    elif 'date' in schedule.columns:
+        schedule['date'] = pd.to_datetime(schedule['date']).dt.date
+        # Filter to keep only games from today onwards for future predictions
+        future_games = schedule[schedule['date'] >= today]
+        # Keep all past games for training
+        past_games = schedule[schedule['date'] < today].dropna()
+        # Combine: past games (completed) + future games (from today onwards)
+        schedule = pd.concat([past_games, future_games], ignore_index=True)
+
+    # Use completed games for training
+    schedule_so_far = schedule.dropna()
+
+    # Compute ratings
+    ratings, home_advantage, rmse = srs.srs_teamtrain(
+        schedule_so_far['home team'],
+        schedule_so_far['away team'],
+        schedule_so_far['home score'],
+        schedule_so_far['away score']
     )
-    residuals = df_played['Run Differential'] - (
-            ratings[df_played['Home'].map(team_index).to_numpy()] -
-            ratings[df_played['Away'].map(team_index).to_numpy()] + home_adv
+
+    # Compute probabilities for all games (including filtered future games)
+    schedule_probs = srs.SRS_to_probabilities(
+        ratings, rmse, schedule, home_advantage
     )
-    sigma = np.std(residuals)
-    df['Home Win Prob'] = norm.cdf(df['Predicted Run Differential'] / sigma)
 
-    # --- Remaining games ---
-    df_remaining = df[df['Home Score'].isna() | df['Away Score'].isna()].copy()
+    # Store in session state
+    st.session_state['ratings'] = ratings.sort_values("Rating", ascending=False)
+    st.session_state['schedule_probs'] = schedule_probs
+    st.session_state['standings'] = standings
+    st.session_state['rmse'] = rmse
+    st.session_state['home_advantage'] = home_advantage
+    st.session_state['sim_results'] = None  # clear old simulation
 
-    # --- Full MLB team info ---
-    team_info = {
-        # NL East
-        'Atlanta Braves': {'League': 'NL', 'Division': 'East'},
-        'Miami Marlins': {'League': 'NL', 'Division': 'East'},
-        'New York Mets': {'League': 'NL', 'Division': 'East'},
-        'Philadelphia Phillies': {'League': 'NL', 'Division': 'East'},
-        'Washington Nationals': {'League': 'NL', 'Division': 'East'},
-        # NL Central
-        'Chicago Cubs': {'League': 'NL', 'Division': 'Central'},
-        'Cincinnati Reds': {'League': 'NL', 'Division': 'Central'},
-        'Milwaukee Brewers': {'League': 'NL', 'Division': 'Central'},
-        'Pittsburgh Pirates': {'League': 'NL', 'Division': 'Central'},
-        'St. Louis Cardinals': {'League': 'NL', 'Division': 'Central'},
-        # NL West
-        'Arizona Diamondbacks': {'League': 'NL', 'Division': 'West'},
-        'Colorado Rockies': {'League': 'NL', 'Division': 'West'},
-        'Los Angeles Dodgers': {'League': 'NL', 'Division': 'West'},
-        'San Diego Padres': {'League': 'NL', 'Division': 'West'},
-        'San Francisco Giants': {'League': 'NL', 'Division': 'West'},
-        # AL East
-        'Baltimore Orioles': {'League': 'AL', 'Division': 'East'},
-        'Boston Red Sox': {'League': 'AL', 'Division': 'East'},
-        'New York Yankees': {'League': 'AL', 'Division': 'East'},
-        'Tampa Bay Rays': {'League': 'AL', 'Division': 'East'},
-        'Toronto Blue Jays': {'League': 'AL', 'Division': 'East'},
-        # AL Central
-        'Chicago White Sox': {'League': 'AL', 'Division': 'Central'},
-        'Cleveland Guardians': {'League': 'AL', 'Division': 'Central'},
-        'Detroit Tigers': {'League': 'AL', 'Division': 'Central'},
-        'Kansas City Royals': {'League': 'AL', 'Division': 'Central'},
-        'Minnesota Twins': {'League': 'AL', 'Division': 'Central'},
-        # AL West
-        'Houston Astros': {'League': 'AL', 'Division': 'West'},
-        'Los Angeles Angels': {'League': 'AL', 'Division': 'West'},
-        'Oakland Athletics': {'League': 'AL', 'Division': 'West'},
-        'Seattle Mariners': {'League': 'AL', 'Division': 'West'},
-        'Texas Rangers': {'League': 'AL', 'Division': 'West'},
-    }
-
-    # --- Current standings ---
-    standings = {team: {'Wins': 0, 'Losses': 0, 'Runs Scored': 0, 'Runs Allowed': 0} for team in teams}
-    for _, row in df_played.iterrows():
-        home, away = row['Home'], row['Away']
-        hs, as_ = row['Home Score'], row['Away Score']
-        standings[home]['Runs Scored'] += hs
-        standings[home]['Runs Allowed'] += as_
-        standings[away]['Runs Scored'] += as_
-        standings[away]['Runs Allowed'] += hs
-        if hs > as_:
-            standings[home]['Wins'] += 1
-            standings[away]['Losses'] += 1
-        elif as_ > hs:
-            standings[away]['Wins'] += 1
-            standings[home]['Losses'] += 1
-
-    # --- Season simulation: Division + Wild Card + Playoff ---
-    n_sims = 1000
-    division_results = {team: 0 for team in teams}
-    wildcard_results = {team: 0 for team in teams}
-    playoff_results = {team: 0 for team in teams}
-
-    for sim in range(n_sims):
-        sim_wins = {team: standings[team]['Wins'] for team in teams}
-        sim_rdiff = {team: standings[team]['Runs Scored'] - standings[team]['Runs Allowed'] for team in teams}
-
-        # Simulate remaining games
-        for _, row in df_remaining.iterrows():
-            home, away = row['Home'], row['Away']
-            pred_rd = row['Predicted Run Differential']
-            simulated_rd = np.random.normal(pred_rd, sigma)
-            if simulated_rd > 0:
-                sim_wins[home] += 1
-                sim_rdiff[home] += simulated_rd
-                sim_rdiff[away] -= simulated_rd
-            else:
-                sim_wins[away] += 1
-                sim_rdiff[away] += -simulated_rd
-                sim_rdiff[home] -= -simulated_rd
-
-        # Determine division winners
-        div_winners = []
-        for league in ['AL', 'NL']:
-            for division in ['East', 'Central', 'West']:
-                teams_in_div = [team for team in teams
-                                if team_info.get(team, {}).get('League') == league
-                                and team_info.get(team, {}).get('Division') == division]
-                if teams_in_div:
-                    winner = max(teams_in_div, key=lambda t: (sim_wins[t], sim_rdiff[t]))
-                    div_winners.append(winner)
-                    division_results[winner] += 1
-
-        # Determine wild cards (top 3 non-division winners per league)
-        for league in ['AL', 'NL']:
-            league_teams = [team for team in teams if
-                            team_info.get(team, {}).get('League') == league and team not in div_winners]
-            league_sorted = sorted(league_teams, key=lambda t: (sim_wins[t], sim_rdiff[t]), reverse=True)
-            wild_cards = league_sorted[:3]
-            for team in wild_cards:
-                wildcard_results[team] += 1
-
-        # Playoff = division winners + wild cards
-        for team in div_winners + wild_cards:
-            playoff_results[team] += 1
-
-    # --- Prepare standings for display ---
-    standings_df = pd.DataFrame.from_dict(standings, orient='index')
-    standings_df['Runs Scored'] = standings_df['Runs Scored'].astype(int)
-    standings_df['Runs Allowed'] = standings_df['Runs Allowed'].astype(int)
-    standings_df['Run Differential'] = (standings_df['Runs Scored'] - standings_df['Runs Allowed']).astype(int)
-    standings_df['Team Rating'] = [round(team_ratings[t], 2) for t in standings_df.index]
-
-    standings_df['Division Win %'] = [division_results[t] / n_sims * 100 for t in standings_df.index]
-    standings_df['Wild Card %'] = [wildcard_results[t] / n_sims * 100 for t in standings_df.index]
-    standings_df['Playoff %'] = [playoff_results[t] / n_sims * 100 for t in standings_df.index]
-
-    standings_df = standings_df.sort_values(by=['Wins', 'Run Differential'], ascending=False)
-
-    # --- Streamlit tabs ---
-    tab1, tab2, tab3 = st.tabs(["Game Data", "Standings", "Upcoming Games"])
-
-    with tab1:
-        st.subheader("Game Data")
-        st.dataframe(
-            df[['Date', 'Home', 'Away', 'Home Score', 'Away Score', 'Predicted Run Differential', 'Home Win Prob']])
-
-    with tab2:
-        st.subheader("Current Standings with Team Ratings & Playoff Probabilities")
-        st.dataframe(
-            standings_df.style.format({
-                'Division Win %': '{:.1f}%',
-                'Wild Card %': '{:.1f}%',
-                'Playoff %': '{:.1f}%'
-            })
+# Run Simulation Button
+if st.button("Run Simulation"):
+    if st.session_state['schedule_probs'] is None or st.session_state['standings'] is None:
+        st.warning("Please fetch ratings first!")
+    else:
+        st.write(f"Running simulations with {trials} trials...")
+        sim_results = sim.MonteCarlo(
+            sim.simulate_mlb,
+            st.session_state['schedule_probs'],
+            st.session_state['standings'],
+            trials=trials
         )
+        st.session_state['sim_results'] = sim_results.sort_values("average", ascending=False)
 
-    with tab3:
-        st.subheader("Upcoming Games")
-        if not df_remaining.empty:
-            st.dataframe(df_remaining[['Date', 'Home', 'Away', 'Predicted Run Differential', 'Home Win Prob']])
+# Create tabs for Team Ratings and Simulation Results
+if st.session_state['ratings'] is not None or st.session_state['sim_results'] is not None:
+    tab1, tab2 = st.tabs(["Team Ratings", "Simulation Results"])
+
+    # Team Ratings Tab
+    with tab1:
+        if st.session_state['ratings'] is not None:
+            st.subheader("Team Ratings with Current Records")
+
+            # Display RMSE and Home Advantage if available
+            if st.session_state['rmse'] is not None and st.session_state['home_advantage'] is not None:
+                col1, col2 = st.columns(2)
+                with col1:
+                    st.metric("RMSE", f"{st.session_state['rmse']:.3f}")
+                with col2:
+                    st.metric("Home Advantage", f"{st.session_state['home_advantage']:.3f}")
+
+            # Merge ratings with standings to get wins and losses
+            if st.session_state['standings'] is not None:
+                # Create a copy of ratings for display
+                ratings_display = st.session_state['ratings'].copy()
+
+                # Round Rating to 2 decimal places with fixed formatting
+                if 'Rating' in ratings_display.columns:
+                    ratings_display['Rating'] = pd.to_numeric(ratings_display['Rating'], errors='coerce').round(
+                        2).apply(lambda x: f"{x:.2f}" if pd.notna(x) else x)
+
+                # Merge with standings to get W/L data
+                # Assuming standings has columns like 'Team', 'W', 'L' or similar
+                # You may need to adjust column names based on your actual standings structure
+                try:
+                    # Reset index to make team names a column if they're currently the index
+                    if ratings_display.index.name or not isinstance(ratings_display.index, pd.RangeIndex):
+                        ratings_display = ratings_display.reset_index()
+                        team_col = ratings_display.columns[0]  # First column should be team names
+
+                    # Try to merge with standings - adjust column names as needed
+                    standings_cols = st.session_state['standings'].columns.tolist()
+
+                    # Common column name patterns for wins/losses
+                    win_col = None
+                    loss_col = None
+                    team_col_standings = None
+
+                    for col in standings_cols:
+                        col_lower = col.lower()
+                        if 'win' in col_lower or col_lower == 'w':
+                            win_col = col
+                        elif 'loss' in col_lower or col_lower == 'l':
+                            loss_col = col
+                        elif 'team' in col_lower:
+                            team_col_standings = col
+
+                    # If we found the necessary columns, merge the data
+                    if win_col and loss_col:
+                        if team_col_standings:
+                            merge_key_standings = team_col_standings
+                        else:
+                            # Assume first column or index contains team names
+                            standings_for_merge = st.session_state['standings'].reset_index()
+                            merge_key_standings = standings_for_merge.columns[0]
+                            standings_for_merge = standings_for_merge
+
+                        # Perform the merge
+                        ratings_with_record = pd.merge(
+                            ratings_display,
+                            st.session_state['standings'][
+                                [merge_key_standings, win_col, loss_col]] if team_col_standings else
+                            standings_for_merge[[merge_key_standings, win_col, loss_col]],
+                            left_on=team_col if 'team_col' in locals() else ratings_display.columns[0],
+                            right_on=merge_key_standings,
+                            how='left'
+                        )
+
+                        # Remove "Tm" column if it exists
+                        if 'Tm' in ratings_with_record.columns:
+                            ratings_with_record = ratings_with_record.drop('Tm', axis=1)
+
+                        # Reorder columns to show W/L after Rating
+                        cols = ratings_with_record.columns.tolist()
+                        if win_col in cols and loss_col in cols:
+                            # Find Rating column position
+                            rating_idx = next((i for i, col in enumerate(cols) if 'rating' in col.lower()), 1)
+
+                            # Reorder: Team, Rating, W, L, other columns
+                            new_order = []
+                            new_order.append(cols[0])  # Team name
+                            if rating_idx < len(cols):
+                                new_order.append(cols[rating_idx])  # Rating
+                            new_order.extend([win_col, loss_col])  # W, L
+
+                            # Add remaining columns
+                            for col in cols:
+                                if col not in new_order:
+                                    new_order.append(col)
+
+                            ratings_with_record = ratings_with_record[new_order]
+
+                        # Calculate win percentage with fixed 3 decimal formatting
+                        if win_col in ratings_with_record.columns and loss_col in ratings_with_record.columns:
+                            win_pct = (
+                                    ratings_with_record[win_col] /
+                                    (ratings_with_record[win_col] + ratings_with_record[loss_col])
+                            )
+                            ratings_with_record['Win%'] = win_pct.apply(lambda x: f"{x:.3f}" if pd.notna(x) else x)
+
+                        # Add rank column and reset index
+                        ratings_with_record = ratings_with_record.reset_index(drop=True)
+                        ratings_with_record.insert(0, 'Rank', range(1, len(ratings_with_record) + 1))
+
+                        # Configure column widths for numerical columns
+                        column_config = {
+                            'Rank': st.column_config.NumberColumn(width='small'),
+                            'Rating': st.column_config.TextColumn(width='small'),
+                            win_col: st.column_config.NumberColumn(width='small'),
+                            loss_col: st.column_config.NumberColumn(width='small'),
+                            'Win%': st.column_config.TextColumn(width='small')
+                        }
+
+                        st.dataframe(ratings_with_record, use_container_width=True, hide_index=True,
+                                     column_config=column_config)
+
+                    else:
+                        st.info("Could not find wins/losses columns in standings data. Showing ratings only.")
+                        # Still apply formatting to ratings-only display
+                        ratings_display = ratings_display.reset_index(drop=True)
+                        if 'Rating' in ratings_display.columns:
+                            ratings_display['Rating'] = pd.to_numeric(ratings_display['Rating'], errors='coerce').round(
+                                2).apply(lambda x: f"{x:.2f}" if pd.notna(x) else x)
+                        ratings_display.insert(0, 'Rank', range(1, len(ratings_display) + 1))
+
+                        # Configure column widths for numerical columns
+                        column_config = {
+                            'Rank': st.column_config.NumberColumn(width='small'),
+                            'Rating': st.column_config.TextColumn(width='small')
+                        }
+
+                        st.dataframe(ratings_display, use_container_width=True, hide_index=True,
+                                     column_config=column_config)
+
+                        # Show available columns for debugging
+                        with st.expander("Debug: Available standings columns"):
+                            st.write("Standings columns:", standings_cols)
+
+                except Exception as e:
+                    st.warning(f"Could not merge ratings with standings: {str(e)}")
+                    # Still apply formatting to fallback display
+                    ratings_display = ratings_display.reset_index(drop=True)
+                    if 'Rating' in ratings_display.columns:
+                        ratings_display['Rating'] = pd.to_numeric(ratings_display['Rating'], errors='coerce').round(
+                            2).apply(lambda x: f"{x:.2f}" if pd.notna(x) else x)
+                    ratings_display.insert(0, 'Rank', range(1, len(ratings_display) + 1))
+
+                    # Configure column widths for numerical columns
+                    column_config = {
+                        'Rank': st.column_config.NumberColumn(width='small'),
+                        'Rating': st.column_config.TextColumn(width='small')
+                    }
+
+                    st.dataframe(ratings_display, use_container_width=True, hide_index=True,
+                                 column_config=column_config)
+
+                    # Show debug info
+                    with st.expander("Debug: Data structure info"):
+                        st.write("Ratings columns:", st.session_state['ratings'].columns.tolist())
+                        st.write("Ratings index:", st.session_state['ratings'].index.name)
+                        if st.session_state['standings'] is not None:
+                            st.write("Standings columns:", st.session_state['standings'].columns.tolist())
+            else:
+                # Apply formatting even when no standings data
+                ratings_display = st.session_state['ratings'].copy()
+                if 'Rating' in ratings_display.columns:
+                    ratings_display['Rating'] = pd.to_numeric(ratings_display['Rating'], errors='coerce').round(
+                        2).apply(lambda x: f"{x:.2f}" if pd.notna(x) else x)
+                ratings_display = ratings_display.reset_index(drop=True)
+                ratings_display.insert(0, 'Rank', range(1, len(ratings_display) + 1))
+
+                # Configure column widths for numerical columns
+                column_config = {
+                    'Rank': st.column_config.NumberColumn(width='small'),
+                    'Rating': st.column_config.TextColumn(width='small')
+                }
+
+                st.dataframe(ratings_display, use_container_width=True, hide_index=True, column_config=column_config)
         else:
-            st.info("No upcoming games remaining.")
+            st.info("Click 'Fetch Ratings' to load team ratings data.")
+
+    # Simulation Results Tab
+    with tab2:
+        if st.session_state['sim_results'] is not None:
+            st.subheader("Monte Carlo Simulation Results")
+
+            # Format numerical columns to 2 decimal places
+            sim_results_display = st.session_state['sim_results'].copy()
+
+            # Apply 2-decimal formatting to all numerical columns
+            for col in sim_results_display.columns:
+                if sim_results_display[col].dtype in ['float64', 'float32', 'int64', 'int32']:
+                    try:
+                        sim_results_display[col] = sim_results_display[col].apply(
+                            lambda x: f"{x:.2f}" if pd.notna(x) else x)
+                    except:
+                        # If formatting fails for any reason, leave the column as-is
+                        pass
+
+            st.dataframe(sim_results_display, use_container_width=True)
+        else:
+            st.info("Click 'Run Simulation' to generate simulation results.")
