@@ -5,6 +5,7 @@ import SALibrary.SimpleRatingSystem as srs
 import wildcard
 import numpy as np
 import pandas as pd
+import time
 from datetime import datetime, date
 
 st.set_page_config(page_title="MLB Season Simulation", layout="wide")
@@ -91,7 +92,8 @@ if st.button("Run Simulation"):
     if st.session_state['schedule_probs'] is None or st.session_state['standings'] is None:
         st.warning("Please fetch ratings first!")
     else:
-        st.write(f"Running simulations with {trials} trials...")
+        status_text = st.empty()
+        status_text.write(f"Running simulations with {trials} trials...")
         sim_results = wildcard.db_MonteCarlo(
             wildcard.db_simulate_mlb,
             st.session_state['schedule_probs'],
@@ -99,6 +101,7 @@ if st.button("Run Simulation"):
             trials=trials
         )
         st.session_state['sim_results'] = sim_results
+        status_text.write("Simulations complete ✅")
 
 # Create tabs for Team Ratings and Simulation Results
 if st.session_state['ratings'] is not None or st.session_state['sim_results'] is not None:

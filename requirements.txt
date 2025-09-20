@@ -5,6 +5,7 @@ pandas
 beautifulsoup4
 scipy
 matplotlib
+time
 requests   # likely needed for scraping
 
 # Local SALibrary wheel in the same folder as app.py
