@@ -5,7 +5,6 @@ import SALibrary.SimpleRatingSystem as srs
 import wildcard
 import numpy as np
 import pandas as pd
-import time
 from datetime import datetime, date
 
 st.set_page_config(page_title="MLB Season Simulation", layout="wide")
